@@ -6,7 +6,7 @@ import tempfile
 import random
 import requests
 from datetime import datetime
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver import ActionChains
@@ -14,6 +14,47 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
+SIGN_IN_URL = "https://oshwhub.com/sign_in"
+LOGIN_URL = "https://passport.jlc.com/login?" + urlencode({
+    "appId": "JLC_OSHWHUB",
+    "redirectUrl": SIGN_IN_URL,
+    "backCode": "1",
+})
+
+
+def is_passport_login(url):
+    page = urlsplit(url)
+    return page.hostname == "passport.jlc.com" and page.path.rstrip("/") == "/login"
+
+
+def is_sign_in_page(url):
+    page = urlsplit(url)
+    return page.hostname == "oshwhub.com" and page.path.rstrip("/") == "/sign_in"
+
+
+def prepare_login(driver, account_index):
+    """主动进入网站提供的 SSO 地址，不依赖签到页自动跳转。"""
+    driver.get(LOGIN_URL)
+    WebDriverWait(driver, 30).until(
+        lambda d: is_passport_login(d.current_url) or is_sign_in_page(d.current_url)
+    )
+    log(f"账号 {account_index} - 已进入统一登录流程")
+    return is_passport_login(driver.current_url)
+
+
+def sign_in_oshwhub(driver, account_index):
+    """只有页面确认已签到才成功；单纯点击不代表服务器处理成功。"""
+    signed = (By.XPATH, '//span[normalize-space(.)="已签到"]')
+    pending = (By.XPATH, '//span[contains(text(),"立即签到")]')
+    wait = WebDriverWait(driver, 30)
+    if any(e.is_displayed() for e in driver.find_elements(*signed)):
+        log(f"账号 {account_index} - ✅ 今天已经在开源平台签到过了")
+        return True
+    wait.until(EC.element_to_be_clickable(pending)).click()
+    wait.until(EC.visibility_of_element_located(signed))
+    log(f"账号 {account_index} - ✅ 开源平台已确认签到成功")
+    return True
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -329,24 +370,9 @@ def sign_in_account(username, password, account_index, total_accounts):
     jlc_message = ""
 
     try:
-        # 1. 打开签到页
-        driver.get("https://oshwhub.com/sign_in")
-        log(f"账号 {account_index} - 已打开 JLC 签到页")
-        
-        # 签到页会先渲染未登录内容，再异步跳转到统一登录中心。
-        # 不能只在固定的某一秒检查 URL，否则会误判为已登录。
-        try:
-            WebDriverWait(driver, 75, poll_frequency=1).until(
-                lambda d: "passport.jlc.com/login" in d.current_url
-            )
-        except Exception:
-            page = urlsplit(driver.current_url)
-            log(f"账号 {account_index} - ❌ 75 秒内未进入登录页，当前页面: {page.netloc}{page.path}")
-            return False
-        current_url = driver.current_url
-
-        # 2. 登录流程
-        if "passport.jlc.com/login" in current_url:
+        # 1. 使用当前网页提供的 SSO 参数主动进入登录中心。
+        # 已有 SSO 会话可以直接回到签到页。
+        if prepare_login(driver, account_index):
             log(f"账号 {account_index} - 检测到未登录状态，正在执行登录流程...")
 
             try:
@@ -437,7 +463,7 @@ def sign_in_account(username, password, account_index, total_accounts):
             log(f"账号 {account_index} - 等待登录跳转...")
             for i in range(25):
                 current_url = driver.current_url
-                if "oshwhub.com" in current_url and "passport.jlc.com" not in current_url:
+                if is_sign_in_page(current_url):
                     log(f"账号 {account_index} - 成功跳转回签到页面")
                     break
                 time.sleep(2)
@@ -458,20 +484,10 @@ def sign_in_account(username, password, account_index, total_accounts):
         # 执行开源平台签到
         oshwhub_success = False
         try:
-            sign_btn = wait.until(
-                EC.element_to_be_clickable((By.XPATH, '//span[contains(text(),"立即签到")]'))
-            )
-            sign_btn.click()
-            log(f"账号 {account_index} - ✅ 开源平台签到成功！")
-            oshwhub_success = True
+            oshwhub_success = sign_in_oshwhub(driver, account_index)
         except Exception as e:
             log(f"账号 {account_index} - ⚠ 开源平台签到按钮: {e}")
-            try:
-                signed_text = driver.find_element(By.XPATH, '//span[contains(text(),"已签到")]')
-                log(f"账号 {account_index} - ✅ 今天已经在开源平台签到过了！")
-                oshwhub_success = True
-            except:
-                log(f"账号 {account_index} - ❌ 开源平台签到失败")
+            log(f"账号 {account_index} - ❌ 开源平台未确认签到成功")
 
         time.sleep(3)
 
