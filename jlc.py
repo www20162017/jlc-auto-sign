@@ -555,7 +555,7 @@ def main():
         log("❌ 错误: 账号和密码数量不匹配!")
         sys.exit(1)
     
-        total_accounts = len(usernames)
+    total_accounts = len(usernames)
     log(f"开始处理 {total_accounts} 个账号的签到任务")
 
     success_count = 0
