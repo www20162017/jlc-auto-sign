@@ -555,4 +555,45 @@ def main():
         log("❌ 错误: 账号和密码数量不匹配!")
         sys.exit(1)
     
-    t
+        total_accounts = len(usernames)
+    log(f"开始处理 {total_accounts} 个账号的签到任务")
+
+    success_count = 0
+    failed_accounts = []
+
+    for i, (username, password) in enumerate(zip(usernames, passwords), 1):
+        log(f"开始处理第 {i} 个账号")
+
+        success = sign_in_account(username, password, i, total_accounts)
+
+        if success:
+            success_count += 1
+            log(f"✅ 第 {i} 个账号签到成功")
+        else:
+            failed_accounts.append(i)
+            log(f"❌ 第 {i} 个账号签到失败")
+
+        if i < total_accounts:
+            wait_time = random.randint(15, 40)
+            log(f"等待 {wait_time} 秒后处理下一个账号...")
+            time.sleep(wait_time)
+
+    log("=" * 50)
+    log("签到任务完成总结:")
+    log(f"总账号数: {total_accounts}")
+    log(f"成功数: {success_count}")
+    log(f"失败数: {len(failed_accounts)}")
+
+    if failed_accounts:
+        log(f"失败的账号序号: {', '.join(map(str, failed_accounts))}")
+    else:
+        log("✅ 所有账号签到成功!")
+
+    log("=" * 50)
+
+    if failed_accounts:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
