@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 import json
@@ -5,6 +6,7 @@ import tempfile
 import random
 import requests
 from datetime import datetime
+from urllib.parse import urlsplit
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver import ActionChains
@@ -21,7 +23,7 @@ def extract_token_from_local_storage(driver):
     try:
         token = driver.execute_script("return window.localStorage.getItem('X-JLC-AccessToken');")
         if token:
-            log(f"✅ 成功从 localStorage 提取 token: {token[:30]}...")
+            log("✅ 成功从 localStorage 提取访问凭证")
             return token
         else:
             log("❌ localStorage 中未找到 X-JLC-AccessToken")
@@ -35,7 +37,7 @@ def extract_token_from_local_storage(driver):
             for key in alternative_keys:
                 token = driver.execute_script(f"return window.localStorage.getItem('{key}');")
                 if token:
-                    log(f"✅ 从 localStorage 的 {key} 提取到 token: {token[:30]}...")
+                    log(f"✅ 从 localStorage 的 {key} 提取到访问凭证")
                     return token
     except Exception as e:
         log(f"❌ 从 localStorage 提取 token 失败: {e}")
@@ -72,7 +74,7 @@ def extract_secretkey_from_devtools(driver):
                         )
                         
                         if secretkey:
-                            log(f"✅ 从请求中提取到 secretkey: {secretkey[:20]}... (URL: {url.split('/')[-1]}...)")
+                            log("✅ 从网络请求中提取到签名凭证")
                             break
                 
                 # 检查网络响应
@@ -90,7 +92,7 @@ def extract_secretkey_from_devtools(driver):
                         )
                         
                         if secretkey:
-                            log(f"✅ 从响应中提取到 secretkey: {secretkey[:20]}... (URL: {url.split('/')[-1]}...)")
+                            log("✅ 从网络响应中提取到签名凭证")
                             break
                             
             except Exception as e:
@@ -322,7 +324,8 @@ def sign_in_account(username, password, account_index, total_accounts):
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     
     wait = WebDriverWait(driver, 25)
-    account_success = False
+    oshwhub_success = False
+    jindou_success = False
     jlc_message = ""
 
     try:
@@ -330,8 +333,16 @@ def sign_in_account(username, password, account_index, total_accounts):
         driver.get("https://oshwhub.com/sign_in")
         log(f"账号 {account_index} - 已打开 JLC 签到页")
         
-        # 延长等待时间
-        time.sleep(12 + random.randint(2, 5))
+        # 签到页会先渲染未登录内容，再异步跳转到统一登录中心。
+        # 不能只在固定的某一秒检查 URL，否则会误判为已登录。
+        try:
+            WebDriverWait(driver, 75, poll_frequency=1).until(
+                lambda d: "passport.jlc.com/login" in d.current_url
+            )
+        except Exception:
+            page = urlsplit(driver.current_url)
+            log(f"账号 {account_index} - ❌ 75 秒内未进入登录页，当前页面: {page.netloc}{page.path}")
+            return False
         current_url = driver.current_url
 
         # 2. 登录流程
@@ -431,7 +442,8 @@ def sign_in_account(username, password, account_index, total_accounts):
                     break
                 time.sleep(2)
             else:
-                log(f"账号 {account_index} - ⚠ 跳转超时，但继续执行")
+                log(f"账号 {account_index} - ❌ 登录后未跳转回签到页面")
+                return False
 
         # 3. 开源平台签到
         log(f"账号 {account_index} - 等待签到页加载...")
@@ -452,14 +464,12 @@ def sign_in_account(username, password, account_index, total_accounts):
             sign_btn.click()
             log(f"账号 {account_index} - ✅ 开源平台签到成功！")
             oshwhub_success = True
-            account_success = True
         except Exception as e:
             log(f"账号 {account_index} - ⚠ 开源平台签到按钮: {e}")
             try:
                 signed_text = driver.find_element(By.XPATH, '//span[contains(text(),"已签到")]')
                 log(f"账号 {account_index} - ✅ 今天已经在开源平台签到过了！")
                 oshwhub_success = True
-                account_success = True
             except:
                 log(f"账号 {account_index} - ❌ 开源平台签到失败")
 
@@ -468,9 +478,10 @@ def sign_in_account(username, password, account_index, total_accounts):
         # 4. 金豆签到流程
         log(f"账号 {account_index} - 开始金豆签到流程...")
         
-        # 跳转到 m.jlc.com
-        driver.get("https://m.jlc.com/")
-        log(f"账号 {account_index} - 已访问 m.jlc.com，等待页面加载...")
+        # 移动端根路径现在可能跳转到 www.jlc.com；使用可直接访问的个人中心。
+        driver.get("https://m.jlc.com/mapp/pages/my/index")
+        page = urlsplit(driver.current_url)
+        log(f"账号 {account_index} - 已访问移动端页面: {page.netloc}{page.path}")
         
         # 延长等待时间
         time.sleep(15)
@@ -486,8 +497,6 @@ def sign_in_account(username, password, account_index, total_accounts):
         
         if access_token and secretkey:
             log(f"账号 {account_index} - ✅ 成功提取 token 和 secretkey")
-            log(f"  Token: {access_token[:30]}...")
-            log(f"  SecretKey: {secretkey[:20]}...")
             
             # 创建 JLC 客户端并执行完整流程
             jlc_client = JLCClient(access_token, secretkey, account_index)
@@ -495,7 +504,6 @@ def sign_in_account(username, password, account_index, total_accounts):
             jlc_message = jlc_client.message
             
             if jindou_success:
-                account_success = account_success and True
                 log(f"账号 {account_index} - ✅ 金豆签到流程完成")
             else:
                 log(f"账号 {account_index} - ❌ 金豆签到流程失败")
@@ -506,19 +514,8 @@ def sign_in_account(username, password, account_index, total_accounts):
             if not secretkey:
                 log(f"账号 {account_index} - ❌ SecretKey 提取失败")
             
-            # 保存页面源码和截图用于调试
-            try:
-                # 检查所有 localStorage 内容
-                all_storage = driver.execute_script("return JSON.stringify(window.localStorage);")
-                log(f"账号 {account_index} - localStorage 内容: {all_storage}")
-                
-                page_source = driver.page_source
-                with open(f"debug_page_account_{account_index}.html", "w", encoding="utf-8") as f:
-                    f.write(page_source)
-                driver.save_screenshot(f"debug_screenshot_account_{account_index}.png")
-                log(f"账号 {account_index} - 已保存调试信息")
-            except Exception as e:
-                log(f"账号 {account_index} - 保存调试信息失败: {e}")
+            page = urlsplit(driver.current_url)
+            log(f"账号 {account_index} - 页面位置: {page.netloc}{page.path}（日志不输出本地存储内容）")
 
     except Exception as e:
         log(f"账号 {account_index} - ❌ 程序执行错误: {e}")
@@ -535,56 +532,27 @@ def sign_in_account(username, password, account_index, total_accounts):
     if jlc_message:
         log(f"账号 {account_index} - 金豆签到结果:\n{jlc_message}")
     
-    return account_success
+    # 开源平台和金豆必须分别成功，才算本账号完整签到成功。
+    return oshwhub_success and jindou_success
 
 def main():
-    if len(sys.argv) < 3:
-        print("用法: python script.py 账号1,账号2,账号3... 密码1,密码2,密码3...")
-        print("示例: python script.py user1,user2,user3 pwd1,pwd2,pwd3")
+    # Actions 通过环境变量传入凭证，避免密码出现在进程命令行和执行日志中。
+    # 保留本地命令行运行的兼容性。
+    if len(sys.argv) >= 3:
+        username_list, password_list = sys.argv[1:3]
+    else:
+        username_list = os.environ.get("JLC_USERNAME", "")
+        password_list = os.environ.get("JLC_PASSWORD", "")
+
+    usernames = [u.strip() for u in username_list.split(',') if u.strip()]
+    passwords = [p.strip() for p in password_list.split(',') if p.strip()]
+
+    if not usernames or not passwords:
+        log("❌ 未配置嘉立创账号或密码。请检查 JLC_USERNAME / JLC_PASSWORD Secrets")
         sys.exit(1)
-    
-    usernames = [u.strip() for u in sys.argv[1].split(',') if u.strip()]
-    passwords = [p.strip() for p in sys.argv[2].split(',') if p.strip()]
     
     if len(usernames) != len(passwords):
         log("❌ 错误: 账号和密码数量不匹配!")
         sys.exit(1)
     
-    total_accounts = len(usernames)
-    log(f"开始处理 {total_accounts} 个账号的签到任务")
-    
-    success_count = 0
-    failed_accounts = []
-    
-    for i, (username, password) in enumerate(zip(usernames, passwords), 1):
-        log(f"开始处理第 {i} 个账号")
-        
-        success = sign_in_account(username, password, i, total_accounts)
-        
-        if success:
-            success_count += 1
-            log(f"✅ 第 {i} 个账号签到成功")
-        else:
-            failed_accounts.append(i)
-            log(f"❌ 第 {i} 个账号签到失败")
-        
-        if i < total_accounts:
-            wait_time = random.randint(15, 40)
-            log(f"等待 {wait_time} 秒后处理下一个账号...")
-            time.sleep(wait_time)
-    
-    # 输出总结
-    log("=" * 50)
-    log("签到任务完成总结:")
-    log(f"总账号数: {total_accounts}")
-    log(f"成功数: {success_count}")
-    log(f"失败数: {len(failed_accounts)}")
-    
-    if failed_accounts:
-        log(f"失败的账号序号: {', '.join(map(str, failed_accounts))}")
-    else:
-        log("✅ 所有账号签到成功!")
-    log("=" * 50)
-
-if __name__ == "__main__":
-    main()
+    t
