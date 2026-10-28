@@ -1,5 +1,8 @@
 name: auto-signin
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
   schedule:
@@ -28,5 +31,7 @@ jobs:
         uses: nanasess/setup-chromedriver@v2
 
       - name: 'Working'
-        run: |
-          python ./jlc.py ${{ secrets.JLC_USERNAME }} ${{ secrets.JLC_PASSWORD }}
+        env:
+          JLC_USERNAME: ${{ secrets.JLC_USERNAME }}
+          JLC_PASSWORD: ${{ secrets.JLC_PASSWORD }}
+        run: python ./jlc.py
