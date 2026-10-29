@@ -43,7 +43,7 @@ def prepare_login(driver, account_index):
 
 
 def get_login_blocker(driver):
-    """只返回脱敏后的登录问题类别，不在日志中输出网页原文。"""
+    """只返回(类别, 脱敏说明)，不在日志中输出网页原文。"""
     error_selectors = (
         ".el-message--error .el-message__content",
         ".el-form-item__error",
@@ -58,14 +58,16 @@ def get_login_blocker(driver):
                 message = element.text.strip()
                 if not message:
                     continue
+                if any(word in message for word in ("验证失败", "验证码错误")):
+                    return "error", "网站提示验证失败，需要本人检查验证方式"
                 if any(word in message for word in ("验证", "滑块", "验证码", "安全")):
-                    return "网站提示需要完成安全验证，GitHub Actions 无法代替人工验证"
+                    return "challenge", "网站提示需要完成安全验证"
                 if any(word in message for word in ("密码", "账号", "账户", "客户编号")):
-                    return "网站提示账号或密码有问题，请检查 GitHub Secrets 和官网登录是否正常"
+                    return "error", "网站提示账号或密码有问题，请检查 GitHub Secrets 和官网登录是否正常"
                 if any(word in message for word in ("频繁", "限制", "异常", "网络")):
-                    return "网站提示请求受限或网络异常，请稍后在官网确认"
+                    return "error", "网站提示请求受限或网络异常，请稍后在官网确认"
                 if selector != "[role='alert']":
-                    return "网站出现登录错误提示（内容已脱敏，未记录账号或密码）"
+                    return "error", "网站出现登录错误提示（内容已脱敏，未记录账号或密码）"
         except Exception:
             continue
 
@@ -77,7 +79,7 @@ def get_login_blocker(driver):
     for selector in challenge_selectors:
         try:
             if any(el.is_displayed() for el in driver.find_elements(By.CSS_SELECTOR, selector)):
-                return "登录页面出现安全验证控件，需要本人在官方网站完成验证"
+                return "challenge", "登录页面存在安全验证控件"
         except Exception:
             continue
     return None
@@ -106,6 +108,7 @@ def log_login_http_errors(driver, account_index):
 def wait_for_login_result(driver, account_index, timeout=40):
     """区分登录成功、网站报错和人机验证，不再盲等旧版滑块控件。"""
     deadline = time.monotonic() + timeout
+    challenge_seen = False
     while time.monotonic() < deadline:
         if is_sign_in_page(driver.current_url):
             log(f"账号 {account_index} - ✅ 登录成功，已返回开源平台签到页")
@@ -113,14 +116,25 @@ def wait_for_login_result(driver, account_index, timeout=40):
 
         blocker = get_login_blocker(driver)
         if blocker:
-            log(f"账号 {account_index} - ❌ {blocker}")
-            log_login_http_errors(driver, account_index)
-            return False
+            kind, explanation = blocker
+            if kind == "challenge":
+                # 验证控件可能只是短暂显示；不要在出现的一瞬间误判失败。
+                # 不在无人值守的 Actions 中模拟解题或绕过网站验证。
+                if not challenge_seen:
+                    log(f"账号 {account_index} - ⚠ {explanation}，继续等待网站处理")
+                    challenge_seen = True
+            else:
+                log(f"账号 {account_index} - ❌ {explanation}")
+                log_login_http_errors(driver, account_index)
+                return False
         time.sleep(1)
 
     page = urlsplit(driver.current_url)
-    log(f"账号 {account_index} - ❌ 登录 40 秒内未完成，当前页面: {page.netloc}{page.path}")
-    log(f"账号 {account_index} - 可能是验证未完成、账号信息错误或站点响应异常")
+    log(f"账号 {account_index} - ❌ 登录 {timeout} 秒内未完成，当前页面: {page.netloc}{page.path}")
+    if challenge_seen:
+        log(f"账号 {account_index} - 安全验证未在等待时间内完成；如需交互，请在官网由本人验证")
+    else:
+        log(f"账号 {account_index} - 可能是账号信息错误或站点响应异常")
     log_login_http_errors(driver, account_index)
     return False
 
@@ -491,6 +505,11 @@ def sign_in_account(username, password, account_index, total_accounts):
                 login_btn = wait.until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, "button.submit"))
                 )
+                # 清除加载登录页面时产生的请求记录，后续 HTTP 状态仅反映本次提交。
+                try:
+                    driver.get_log("performance")
+                except Exception:
+                    pass
                 login_btn.click()
                 log(f"账号 {account_index} - 已点击登录按钮")
             except Exception as e:
