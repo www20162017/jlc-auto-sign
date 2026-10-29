@@ -9,7 +9,6 @@ from datetime import datetime
 from urllib.parse import urlsplit, urlencode
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver import ActionChains
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.webdriver.support.ui import WebDriverWait
@@ -41,6 +40,89 @@ def prepare_login(driver, account_index):
     )
     log(f"账号 {account_index} - 已进入统一登录流程")
     return is_passport_login(driver.current_url)
+
+
+def get_login_blocker(driver):
+    """只返回脱敏后的登录问题类别，不在日志中输出网页原文。"""
+    error_selectors = (
+        ".el-message--error .el-message__content",
+        ".el-form-item__error",
+        "[role='alert']",
+        ".error-message",
+    )
+    for selector in error_selectors:
+        try:
+            for element in driver.find_elements(By.CSS_SELECTOR, selector):
+                if not element.is_displayed():
+                    continue
+                message = element.text.strip()
+                if not message:
+                    continue
+                if any(word in message for word in ("验证", "滑块", "验证码", "安全")):
+                    return "网站提示需要完成安全验证，GitHub Actions 无法代替人工验证"
+                if any(word in message for word in ("密码", "账号", "账户", "客户编号")):
+                    return "网站提示账号或密码有问题，请检查 GitHub Secrets 和官网登录是否正常"
+                if any(word in message for word in ("频繁", "限制", "异常", "网络")):
+                    return "网站提示请求受限或网络异常，请稍后在官网确认"
+                if selector != "[role='alert']":
+                    return "网站出现登录错误提示（内容已脱敏，未记录账号或密码）"
+        except Exception:
+            continue
+
+    # 检测验证码/安全验证控件，不自动尝试破解或模拟人工验证。
+    challenge_selectors = (
+        ".btn_slide", ".nc_scale", "iframe[src*='captcha']",
+        "iframe[src*='verify']", "[class*='captcha']",
+    )
+    for selector in challenge_selectors:
+        try:
+            if any(el.is_displayed() for el in driver.find_elements(By.CSS_SELECTOR, selector)):
+                return "登录页面出现安全验证控件，需要本人在官方网站完成验证"
+        except Exception:
+            continue
+    return None
+
+
+def log_login_http_errors(driver, account_index):
+    """仅输出登录站点的 HTTP 错误状态码，不泄露请求体、Cookie 或 URL 参数。"""
+    try:
+        statuses = set()
+        for entry in driver.get_log("performance"):
+            message = json.loads(entry["message"]).get("message", {})
+            if message.get("method") != "Network.responseReceived":
+                continue
+            response = message.get("params", {}).get("response", {})
+            if urlsplit(response.get("url", "")).hostname != "passport.jlc.com":
+                continue
+            status = int(response.get("status", 0))
+            if status >= 400:
+                statuses.add(status)
+        if statuses:
+            log(f"账号 {account_index} - 登录中心 HTTP 错误状态码: {', '.join(map(str, sorted(statuses)))}")
+    except Exception:
+        pass
+
+
+def wait_for_login_result(driver, account_index, timeout=40):
+    """区分登录成功、网站报错和人机验证，不再盲等旧版滑块控件。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if is_sign_in_page(driver.current_url):
+            log(f"账号 {account_index} - ✅ 登录成功，已返回开源平台签到页")
+            return True
+
+        blocker = get_login_blocker(driver)
+        if blocker:
+            log(f"账号 {account_index} - ❌ {blocker}")
+            log_login_http_errors(driver, account_index)
+            return False
+        time.sleep(1)
+
+    page = urlsplit(driver.current_url)
+    log(f"账号 {account_index} - ❌ 登录 40 秒内未完成，当前页面: {page.netloc}{page.path}")
+    log(f"账号 {account_index} - 可能是验证未完成、账号信息错误或站点响应异常")
+    log_login_http_errors(driver, account_index)
+    return False
 
 
 def sign_in_oshwhub(driver, account_index):
@@ -415,60 +497,10 @@ def sign_in_account(username, password, account_index, total_accounts):
                 log(f"账号 {account_index} - ❌ 登录按钮定位失败: {e}")
                 return False
 
-            # 处理滑块验证
-            time.sleep(8)
-            try:
-                slider = wait.until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, ".btn_slide"))
-                )
-                
-                track = wait.until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".nc_scale"))
-                )
-                
-                track_width = track.size['width']
-                slider_width = slider.size['width']
-                move_distance = track_width - slider_width - 10
-                
-                log(f"账号 {account_index} - 检测到滑块验证码，滑动距离: {move_distance}px")
-                
-                actions = ActionChains(driver)
-                actions.click_and_hold(slider).perform()
-                time.sleep(0.5)
-                
-                # 分段滑动
-                quick_steps = int(move_distance * 0.7)
-                for i in range(quick_steps):
-                    if i % 10 == 0:
-                        time.sleep(0.01)
-                    actions.move_by_offset(1, 0).perform()
-                
-                time.sleep(0.2)
-                
-                slow_steps = move_distance - quick_steps
-                for i in range(slow_steps):
-                    if i % 3 == 0:
-                        time.sleep(0.02)
-                    y_offset = 1 if i % 2 == 0 else -1 if i % 5 == 0 else 0
-                    actions.move_by_offset(1, y_offset).perform()
-                
-                actions.release().perform()
-                log(f"账号 {account_index} - 滑块拖动完成")
-                time.sleep(5)
-                
-            except Exception as e:
-                log(f"账号 {account_index} - 滑块验证处理: {e}")
-
-            # 等待跳转
-            log(f"账号 {account_index} - 等待登录跳转...")
-            for i in range(25):
-                current_url = driver.current_url
-                if is_sign_in_page(current_url):
-                    log(f"账号 {account_index} - 成功跳转回签到页面")
-                    break
-                time.sleep(2)
-            else:
-                log(f"账号 {account_index} - ❌ 登录后未跳转回签到页面")
+            # 登录按钮提交后，旧版 .btn_slide 并不一定存在。
+            # 实际检查跳转、网站错误提示及安全验证，避免空等和误报。
+            log(f"账号 {account_index} - 正在确认登录结果...")
+            if not wait_for_login_result(driver, account_index):
                 return False
 
         # 3. 开源平台签到
